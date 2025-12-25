@@ -379,8 +379,45 @@ class AudioCallClient {
                                 });
                             });
                             
+                            // ВАЖНО: Проверяем статистику соединения
+                            setTimeout(() => {
+                                this.checkConnectionStats();
+                            }, 2000);
+                            
+                            // Периодическая проверка статистики
+                            const statsInterval = setInterval(() => {
+                                if (this.peerConnection && this.remoteStream) {
+                                    this.checkConnectionStats();
+                                } else {
+                                    clearInterval(statsInterval);
+                                }
+                            }, 5000);
+                            
+                            // Останавливаем проверку через 60 секунд
+                            setTimeout(() => {
+                                clearInterval(statsInterval);
+                            }, 60000);
+                            
                             // Запускаем мониторинг аудио потока
                             this.startRemoteAudioMonitoring(stream);
+                            
+                            // Дополнительная проверка: убеждаемся, что Audio элемент действительно воспроизводит
+                            setTimeout(() => {
+                                if (this.remoteAudio && !this.remoteAudio.paused) {
+                                    console.log('Проверка Audio элемента через 1 секунду:', {
+                                        paused: this.remoteAudio.paused,
+                                        muted: this.remoteAudio.muted,
+                                        volume: this.remoteAudio.volume,
+                                        currentTime: this.remoteAudio.currentTime,
+                                        readyState: this.remoteAudio.readyState
+                                    });
+                                    
+                                    // Проверяем, есть ли реальные данные
+                                    if (this.remoteAudio.currentTime === 0 && this.remoteAudio.readyState >= 2) {
+                                        console.warn('⚠️ Audio элемент не воспроизводит - возможно нет данных');
+                                    }
+                                }
+                            }, 1000);
                             
                             this.showAudioStatus(true);
                             this.updateStatus('Соединение установлено', 'connected');
@@ -520,8 +557,45 @@ class AudioCallClient {
                                 });
                             });
                             
+                            // ВАЖНО: Проверяем статистику соединения
+                            setTimeout(() => {
+                                this.checkConnectionStats();
+                            }, 2000);
+                            
+                            // Периодическая проверка статистики
+                            const statsInterval = setInterval(() => {
+                                if (this.peerConnection && this.remoteStream) {
+                                    this.checkConnectionStats();
+                                } else {
+                                    clearInterval(statsInterval);
+                                }
+                            }, 5000);
+                            
+                            // Останавливаем проверку через 60 секунд
+                            setTimeout(() => {
+                                clearInterval(statsInterval);
+                            }, 60000);
+                            
                             // Запускаем мониторинг аудио потока
                             this.startRemoteAudioMonitoring(stream);
+                            
+                            // Дополнительная проверка: убеждаемся, что Audio элемент действительно воспроизводит
+                            setTimeout(() => {
+                                if (this.remoteAudio && !this.remoteAudio.paused) {
+                                    console.log('Проверка Audio элемента через 1 секунду:', {
+                                        paused: this.remoteAudio.paused,
+                                        muted: this.remoteAudio.muted,
+                                        volume: this.remoteAudio.volume,
+                                        currentTime: this.remoteAudio.currentTime,
+                                        readyState: this.remoteAudio.readyState
+                                    });
+                                    
+                                    // Проверяем, есть ли реальные данные
+                                    if (this.remoteAudio.currentTime === 0 && this.remoteAudio.readyState >= 2) {
+                                        console.warn('⚠️ Audio элемент не воспроизводит - возможно нет данных');
+                                    }
+                                }
+                            }, 1000);
                             
                             this.updateStatus('Соединение установлено', 'connected');
                             this.remoteUsernameEl.textContent = 'Пользователь подключен';
@@ -663,7 +737,7 @@ class AudioCallClient {
             console.log('ICE connection state:', state);
             
             if (state === 'connected' || state === 'completed') {
-                console.log('ICE соединение установлено');
+                console.log('✅ ICE соединение установлено:', state);
                 // Проверяем наличие треков
                 const receivers = this.peerConnection.getReceivers();
                 console.log('Получено треков:', receivers.length);
@@ -672,6 +746,11 @@ class AudioCallClient {
                         console.log(`Трек ${index}:`, receiver.track.kind, receiver.track.enabled, receiver.track.readyState);
                     }
                 });
+                
+                // Проверяем статистику соединения
+                setTimeout(() => {
+                    this.checkConnectionStats();
+                }, 1000);
             }
             
             if (state === 'failed') {
@@ -853,6 +932,74 @@ class AudioCallClient {
         checkAudioLevel();
     }
 
+    async checkConnectionStats() {
+        if (!this.peerConnection) return;
+
+        try {
+            const stats = await this.peerConnection.getStats();
+            let bytesReceived = 0;
+            let bytesSent = 0;
+            let packetsReceived = 0;
+            let packetsSent = 0;
+            let hasActiveConnection = false;
+
+            stats.forEach(report => {
+                if (report.type === 'inbound-rtp' && report.mediaType === 'audio') {
+                    bytesReceived = report.bytesReceived || 0;
+                    packetsReceived = report.packetsReceived || 0;
+                    hasActiveConnection = true;
+                    console.log('📊 Входящий RTP:', {
+                        bytesReceived,
+                        packetsReceived,
+                        jitter: report.jitter,
+                        packetsLost: report.packetsLost
+                    });
+                }
+                if (report.type === 'outbound-rtp' && report.mediaType === 'audio') {
+                    bytesSent = report.bytesSent || 0;
+                    packetsSent = report.packetsSent || 0;
+                    console.log('📊 Исходящий RTP:', {
+                        bytesSent,
+                        packetsSent,
+                        packetsLost: report.packetsLost
+                    });
+                }
+                if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+                    console.log('📊 Candidate pair succeeded:', {
+                        localCandidate: report.localCandidateId,
+                        remoteCandidate: report.remoteCandidateId,
+                        bytesReceived: report.bytesReceived,
+                        bytesSent: report.bytesSent
+                    });
+                }
+            });
+
+                if (!hasActiveConnection) {
+                console.error('❌ Нет активного RTP соединения! Данные не передаются.');
+                console.error('Возможные причины:');
+                console.error('1. Соединение не установлено (failed/disconnected)');
+                console.error('2. Треки не передаются через соединение');
+                console.error('3. Проблемы с NAT/firewall - нужен TURN сервер');
+                console.error('4. Строгий NAT блокирует прямое соединение');
+                
+                // Предлагаем решение
+                this.updateStatus('Ошибка: соединение не установлено. Попробуйте переподключиться или использовать другую сеть.', 'connecting');
+            } else if (bytesReceived === 0) {
+                console.warn('⚠️ RTP соединение есть, но данные не приходят (bytesReceived = 0)');
+                console.warn('Возможные причины:');
+                console.warn('1. Собеседник не говорит в микрофон');
+                console.warn('2. Микрофон выключен на стороне отправителя');
+                console.warn('3. Трек muted на стороне отправителя');
+                this.updateStatus('Соединение установлено. Ожидание звука от собеседника...', 'connected');
+            } else {
+                console.log('✅ Данные передаются! Bytes received:', bytesReceived);
+                console.log('✅ Соединение работает корректно');
+            }
+        } catch (error) {
+            console.error('Ошибка получения статистики:', error);
+        }
+    }
+
     startRemoteAudioMonitoring(stream) {
         if (!stream) return;
 
@@ -887,6 +1034,13 @@ class AudioCallClient {
                     if (silentCount === 100) {
                         console.warn('⚠️ Удаленное аудио тихое или отсутствует уже 100 проверок');
                         console.warn('Проверьте, что собеседник говорит в микрофон');
+                        // Проверяем статистику соединения
+                        this.checkConnectionStats();
+                    }
+                    if (silentCount === 200) {
+                        console.error('❌ КРИТИЧНО: Данные не приходят уже 200 проверок!');
+                        console.error('Соединение не работает. Попробуйте переподключиться.');
+                        this.updateStatus('Ошибка: данные не приходят. Переподключитесь.', 'connecting');
                     }
                 }
 
