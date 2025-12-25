@@ -187,8 +187,24 @@ class AudioCallClient {
                     id: track.id,
                     enabled: track.enabled,
                     readyState: track.readyState,
+                    muted: track.muted,
                     label: track.label
                 });
+                
+                // ВАЖНО: Убеждаемся, что трек не muted
+                if (track.muted) {
+                    console.warn('⚠️ ВНИМАНИЕ: Локальный трек muted! Включите микрофон.');
+                    track.enabled = true;
+                }
+                
+                // Следим за изменениями muted состояния
+                track.onmute = () => {
+                    console.warn('⚠️ Локальный трек стал muted');
+                };
+                
+                track.onunmute = () => {
+                    console.log('✅ Локальный трек unmuted');
+                };
                 
                 const sender = this.peerConnection.getSenders().find(s => 
                     s.track && s.track.kind === track.kind
@@ -198,6 +214,11 @@ class AudioCallClient {
                     this.peerConnection.addTrack(track, this.localStream);
                 } else {
                     console.log('Трек уже добавлен в peer connection');
+                    // Обновляем трек в sender, если нужно
+                    if (sender.track && sender.track.id !== track.id) {
+                        console.log('Замена трека в sender');
+                        sender.replaceTrack(track);
+                    }
                 }
             });
             
@@ -244,9 +265,26 @@ class AudioCallClient {
                 { urls: 'stun:stun1.l.google.com:19302' },
                 { urls: 'stun:stun2.l.google.com:19302' },
                 { urls: 'stun:stun3.l.google.com:19302' },
-                { urls: 'stun:stun4.l.google.com:19302' }
+                { urls: 'stun:stun4.l.google.com:19302' },
+                // Добавляем бесплатный TURN сервер для обхода NAT
+                {
+                    urls: 'turn:openrelay.metered.ca:80',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                },
+                {
+                    urls: 'turn:openrelay.metered.ca:443',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                },
+                {
+                    urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                }
             ],
-            iceCandidatePoolSize: 10
+            iceCandidatePoolSize: 10,
+            iceTransportPolicy: 'all' // Пробуем и STUN и TURN
         };
 
         this.peerConnection = new RTCPeerConnection(configuration);
@@ -283,12 +321,27 @@ class AudioCallClient {
                 };
                 
                 track.onmute = () => {
-                    console.warn('Аудио трек приглушен');
+                    console.warn('⚠️ Аудио трек приглушен (muted)');
+                    this.updateStatus('Собеседник выключил микрофон', 'connected');
                 };
                 
                 track.onunmute = () => {
-                    console.log('Аудио трек разглушен');
+                    console.log('✅ Аудио трек разглушен (unmuted)');
+                    this.updateStatus('Соединение установлено', 'connected');
+                    // Пытаемся воспроизвести, если было приостановлено
+                    if (this.remoteAudio && this.remoteAudio.paused) {
+                        this.remoteAudio.play().catch(e => console.error('Ошибка воспроизведения:', e));
+                    }
                 };
+                
+                // Проверяем начальное состояние
+                if (track.muted) {
+                    console.warn('⚠️ ВНИМАНИЕ: Трек приходит с muted=true!');
+                    console.warn('Это может означать, что удаленный пользователь не говорит или микрофон выключен');
+                    this.updateStatus('Соединение установлено. Ожидание звука от собеседника...', 'connected');
+                } else {
+                    console.log('✅ Трек не muted, звук должен передаваться');
+                }
                 
                 // Создаем или обновляем audio элемент
                 if (!this.remoteAudio) {
@@ -342,6 +395,18 @@ class AudioCallClient {
                 // Пытаемся воспроизвести
                 const playAudio = () => {
                     if (this.remoteAudio && this.remoteAudio.srcObject) {
+                        // Проверяем, есть ли активные треки
+                        const activeTracks = stream.getAudioTracks().filter(t => 
+                            t.readyState === 'live' && t.enabled && !t.muted
+                        );
+                        console.log('Активных треков:', activeTracks.length);
+                        
+                        if (activeTracks.length === 0) {
+                            console.warn('⚠️ Нет активных треков для воспроизведения');
+                            this.updateStatus('Соединение установлено. Ожидание звука от собеседника...', 'connected');
+                            return;
+                        }
+                        
                         this.remoteAudio.play().then(() => {
                             console.log('✅ Удаленное аудио воспроизводится!');
                             console.log('Audio paused:', this.remoteAudio.paused);
@@ -420,7 +485,20 @@ class AudioCallClient {
                     this.updateStatus('Соединение прервано', 'connecting');
                     break;
                 case 'failed':
-                    this.updateStatus('Ошибка соединения. Попробуйте переподключиться.', 'connecting');
+                    console.error('❌ Connection state: FAILED');
+                    console.error('WebRTC соединение не может установиться');
+                    this.updateStatus('Ошибка соединения. Возможно нужен TURN сервер. Попробуйте переподключиться.', 'connecting');
+                    
+                    // Показываем более подробную информацию
+                    const iceState = this.peerConnection.iceConnectionState;
+                    console.error('ICE connection state:', iceState);
+                    console.error('ICE gathering state:', this.peerConnection.iceGatheringState);
+                    console.error('Signaling state:', this.peerConnection.signalingState);
+                    
+                    // Если это проблема с NAT, предлагаем решение
+                    if (iceState === 'failed') {
+                        alert('Соединение не может установиться. Это может быть из-за строгого NAT или firewall.\n\nПопробуйте:\n1. Переподключиться\n2. Использовать другую сеть\n3. Настроить TURN сервер');
+                    }
                     break;
                 case 'closed':
                     console.log('Соединение закрыто');
@@ -445,11 +523,25 @@ class AudioCallClient {
                 });
             }
             
-            if (state === 'failed' || state === 'disconnected') {
-                // Попытка восстановления
-                if (state === 'failed') {
-                    this.updateStatus('Проблемы с соединением. Попробуйте переподключиться.', 'connecting');
-                }
+            if (state === 'failed') {
+                console.error('❌ ICE соединение failed!');
+                console.error('Возможные причины:');
+                console.error('1. Проблемы с NAT/firewall - нужен TURN сервер');
+                console.error('2. Нестабильное интернет-соединение');
+                console.error('3. Проблемы с STUN серверами');
+                this.updateStatus('Ошибка соединения. Попробуйте переподключиться или проверьте интернет.', 'connecting');
+                
+                // Попытка переподключения
+                setTimeout(() => {
+                    if (this.peerConnection && this.peerConnection.iceConnectionState === 'failed') {
+                        console.log('Попытка восстановления соединения...');
+                        this.hangup();
+                        this.updateStatus('Соединение разорвано. Создайте новую комнату.', 'connecting');
+                    }
+                }, 3000);
+            } else if (state === 'disconnected') {
+                console.warn('⚠️ ICE соединение disconnected');
+                this.updateStatus('Соединение прервано. Ожидание восстановления...', 'connecting');
             }
         };
     }
