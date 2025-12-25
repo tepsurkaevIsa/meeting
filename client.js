@@ -259,15 +259,19 @@ class AudioCallClient {
             this.peerConnection.close();
         }
 
+        // Сначала пробуем с TURN (для обхода NAT)
+        // Если не работает, можно попробовать 'all' для использования и STUN и TURN
+        const useRelayOnly = false; // Установите true, если нужно использовать только TURN
+        
         const configuration = {
             iceServers: [
-                // STUN серверы
-                { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:stun1.l.google.com:19302' },
-                { urls: 'stun:stun2.l.google.com:19302' },
-                { urls: 'stun:stun3.l.google.com:19302' },
-                { urls: 'stun:stun4.l.google.com:19302' },
-                // TURN серверы (бесплатные)
+                // STUN серверы (только если не используем только TURN)
+                ...(useRelayOnly ? [] : [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    { urls: 'stun:stun2.l.google.com:19302' }
+                ]),
+                // TURN серверы (приоритет для обхода NAT)
                 {
                     urls: [
                         'turn:openrelay.metered.ca:80',
@@ -277,28 +281,37 @@ class AudioCallClient {
                     username: 'openrelayproject',
                     credential: 'openrelayproject'
                 },
+                {
+                    urls: [
+                        'turn:relay.metered.ca:80',
+                        'turn:relay.metered.ca:443',
+                        'turn:relay.metered.ca:443?transport=tcp'
+                    ],
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                },
                 // Дополнительные TURN серверы
                 {
-                    urls: 'turn:relay.metered.ca:80',
+                    urls: 'turn:openrelay.metered.ca:80?transport=udp',
                     username: 'openrelayproject',
                     credential: 'openrelayproject'
                 },
                 {
-                    urls: 'turn:relay.metered.ca:443',
-                    username: 'openrelayproject',
-                    credential: 'openrelayproject'
-                },
-                {
-                    urls: 'turn:relay.metered.ca:443?transport=tcp',
+                    urls: 'turn:openrelay.metered.ca:80?transport=tcp',
                     username: 'openrelayproject',
                     credential: 'openrelayproject'
                 }
             ],
             iceCandidatePoolSize: 10,
-            iceTransportPolicy: 'all', // Пробуем и STUN и TURN
+            iceTransportPolicy: useRelayOnly ? 'relay' : 'all', // Используем 'relay' только если нужно
             bundlePolicy: 'max-bundle',
             rtcpMuxPolicy: 'require'
         };
+        
+        console.log('ICE конфигурация:', {
+            iceTransportPolicy: configuration.iceTransportPolicy,
+            iceServersCount: configuration.iceServers.length
+        });
 
         this.peerConnection = new RTCPeerConnection(configuration);
 
@@ -760,6 +773,27 @@ class AudioCallClient {
                 console.error('2. Нестабильное интернет-соединение');
                 console.error('3. Проблемы с STUN/TURN серверами');
                 
+                // Проверяем статистику - используется ли TURN
+                this.peerConnection.getStats().then(stats => {
+                    let usingRelay = false;
+                    stats.forEach(report => {
+                        if ((report.type === 'local-candidate' || report.type === 'remote-candidate') && 
+                            report.candidateType === 'relay') {
+                            usingRelay = true;
+                            console.log('✅ TURN сервер используется:', report.candidate);
+                        }
+                    });
+                    
+                    if (!usingRelay) {
+                        console.error('❌ КРИТИЧНО: TURN сервер НЕ используется!');
+                        console.error('Это основная причина failed соединения.');
+                        console.error('Решения:');
+                        console.error('1. Использовать VPN');
+                        console.error('2. Использовать другую сеть (мобильный интернет)');
+                        console.error('3. Настроить свой TURN сервер');
+                    }
+                }).catch(e => console.error('Ошибка проверки TURN:', e));
+                
                 // Проверяем, есть ли активные треки - если есть, продолжаем работу
                 const hasActiveTracks = this.remoteStream && 
                     this.remoteStream.getAudioTracks().some(t => 
@@ -981,6 +1015,23 @@ class AudioCallClient {
                 console.error('2. Треки не передаются через соединение');
                 console.error('3. Проблемы с NAT/firewall - нужен TURN сервер');
                 console.error('4. Строгий NAT блокирует прямое соединение');
+                
+                // Проверяем, используется ли TURN
+                let usingRelay = false;
+                stats.forEach(report => {
+                    if (report.type === 'local-candidate' && report.candidateType === 'relay') {
+                        usingRelay = true;
+                        console.log('✅ TURN сервер используется:', report.candidate);
+                    }
+                });
+                
+                if (!usingRelay) {
+                    console.error('❌ TURN сервер НЕ используется! Это основная проблема.');
+                    console.error('Попробуйте:');
+                    console.error('1. Использовать VPN');
+                    console.error('2. Использовать другую сеть');
+                    console.error('3. Настроить свой TURN сервер');
+                }
                 
                 // Предлагаем решение
                 this.updateStatus('Ошибка: соединение не установлено. Попробуйте переподключиться или использовать другую сеть.', 'connecting');
