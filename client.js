@@ -16,6 +16,7 @@ class AudioCallClient {
         this.isMuted = false;
         this.iceCandidatesQueue = [];
         this.isInitiator = false;
+        this.remoteAudio = null;
         
         this.initializeElements();
         this.setupEventListeners();
@@ -120,6 +121,10 @@ class AudioCallClient {
             this.updateStatus('Соединение с сервером потеряно', 'connecting');
         });
 
+        this.socket.on('connect_error', (error) => {
+            console.error('Ошибка подключения к серверу:', error);
+        });
+
         this.socket.on('error', (error) => {
             alert('Ошибка: ' + error.message);
             this.updateStatus('Ошибка подключения', 'connecting');
@@ -222,15 +227,60 @@ class AudioCallClient {
         // Обработка удаленного потока
         this.peerConnection.ontrack = (event) => {
             console.log('Получен удаленный поток:', event);
-            this.remoteStream = event.streams[0];
-            this.updateStatus('Соединение установлено', 'connected');
-            this.remoteUsernameEl.textContent = 'Пользователь подключен';
+            console.log('Треки в потоке:', event.streams[0]?.getTracks());
             
-            // Создаем аудио элемент для воспроизведения (опционально, для отладки)
-            if (this.remoteStream) {
-                const audio = new Audio();
-                audio.srcObject = this.remoteStream;
-                audio.play().catch(e => console.log('Автовоспроизведение заблокировано'));
+            // Получаем поток из события
+            const stream = event.streams[0] || event.stream;
+            this.remoteStream = stream;
+            
+            // Обрабатываем все аудио треки
+            if (stream) {
+                const audioTracks = stream.getAudioTracks();
+                console.log('Аудио треки получены:', audioTracks.length);
+                
+                if (audioTracks.length > 0) {
+                    // Создаем или обновляем audio элемент
+                    if (!this.remoteAudio) {
+                        this.remoteAudio = new Audio();
+                        this.remoteAudio.autoplay = true;
+                        this.remoteAudio.volume = 1.0;
+                        
+                        // Обработка ошибок воспроизведения
+                        this.remoteAudio.onerror = (e) => {
+                            console.error('Ошибка воспроизведения аудио:', e);
+                        };
+                        
+                        this.remoteAudio.onloadedmetadata = () => {
+                            console.log('Метаданные аудио загружены');
+                        };
+                    }
+                    
+                    // Устанавливаем поток
+                    this.remoteAudio.srcObject = stream;
+                    
+                    // Пытаемся воспроизвести
+                    this.remoteAudio.play().then(() => {
+                        console.log('Удаленное аудио воспроизводится');
+                        this.updateStatus('Соединение установлено', 'connected');
+                        this.remoteUsernameEl.textContent = 'Пользователь подключен';
+                    }).catch(error => {
+                        console.error('Ошибка автовоспроизведения:', error);
+                        // Показываем сообщение пользователю
+                        this.updateStatus('Соединение установлено. Нажмите для воспроизведения звука', 'connected');
+                        this.remoteUsernameEl.textContent = 'Пользователь подключен (нажмите для звука)';
+                        
+                        // Добавляем обработчик клика для воспроизведения
+                        document.addEventListener('click', () => {
+                            if (this.remoteAudio && this.remoteAudio.paused) {
+                                this.remoteAudio.play().then(() => {
+                                    console.log('Воспроизведение начато после клика');
+                                    this.updateStatus('Соединение установлено', 'connected');
+                                    this.remoteUsernameEl.textContent = 'Пользователь подключен';
+                                }).catch(e => console.error('Ошибка воспроизведения:', e));
+                            }
+                        }, { once: true });
+                    });
+                }
             }
         };
 
@@ -254,6 +304,10 @@ class AudioCallClient {
             switch(state) {
                 case 'connected':
                     this.updateStatus('Соединение установлено', 'connected');
+                    // Убеждаемся, что аудио воспроизводится
+                    if (this.remoteAudio && this.remoteAudio.paused) {
+                        this.remoteAudio.play().catch(e => console.log('Ошибка воспроизведения:', e));
+                    }
                     break;
                 case 'disconnected':
                     this.updateStatus('Соединение прервано', 'connecting');
@@ -272,6 +326,18 @@ class AudioCallClient {
             const state = this.peerConnection.iceConnectionState;
             console.log('ICE connection state:', state);
             
+            if (state === 'connected' || state === 'completed') {
+                console.log('ICE соединение установлено');
+                // Проверяем наличие треков
+                const receivers = this.peerConnection.getReceivers();
+                console.log('Получено треков:', receivers.length);
+                receivers.forEach((receiver, index) => {
+                    if (receiver.track) {
+                        console.log(`Трек ${index}:`, receiver.track.kind, receiver.track.enabled, receiver.track.readyState);
+                    }
+                });
+            }
+            
             if (state === 'failed' || state === 'disconnected') {
                 // Попытка восстановления
                 if (state === 'failed') {
@@ -283,13 +349,19 @@ class AudioCallClient {
 
     async createOffer() {
         try {
-            const offer = await this.peerConnection.createOffer();
+            console.log('Создание offer...');
+            const offer = await this.peerConnection.createOffer({
+                offerToReceiveAudio: true,
+                offerToReceiveVideo: false
+            });
             await this.peerConnection.setLocalDescription(offer);
+            console.log('Local description установлен:', offer.type);
             
             this.socket.emit('offer', {
                 roomId: this.roomId,
                 offer: offer
             });
+            console.log('Offer отправлен');
         } catch (error) {
             console.error('Ошибка создания offer:', error);
         }
@@ -297,14 +369,23 @@ class AudioCallClient {
 
     async handleOffer(offer) {
         try {
+            console.log('Получен offer, создание answer...');
             await this.peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
-            const answer = await this.peerConnection.createAnswer();
+            console.log('Remote description установлен');
+            
+            const answer = await this.peerConnection.createAnswer({
+                offerToReceiveAudio: true,
+                offerToReceiveVideo: false
+            });
             await this.peerConnection.setLocalDescription(answer);
+            console.log('Answer создан и отправлен');
             
             this.socket.emit('answer', {
                 roomId: this.roomId,
                 answer: answer
             });
+            // Обрабатываем накопленные ICE кандидаты
+            this.processIceCandidatesQueue();
         } catch (error) {
             console.error('Ошибка обработки offer:', error);
         }
@@ -419,17 +500,34 @@ class AudioCallClient {
             this.localStream = null;
         }
         
+        if (this.remoteAudio) {
+            this.remoteAudio.pause();
+            this.remoteAudio.srcObject = null;
+            this.remoteAudio = null;
+        }
+        
+        if (this.remoteStream) {
+            this.remoteStream.getTracks().forEach(track => {
+                track.stop();
+            });
+            this.remoteStream = null;
+        }
+        
         if (this.peerConnection) {
             this.peerConnection.getSenders().forEach(sender => {
                 if (sender.track) {
                     sender.track.stop();
                 }
             });
+            this.peerConnection.getReceivers().forEach(receiver => {
+                if (receiver.track) {
+                    receiver.track.stop();
+                }
+            });
             this.peerConnection.close();
             this.peerConnection = null;
         }
         
-        this.remoteStream = null;
         this.iceCandidatesQueue = [];
         this.isInitiator = false;
         this.updateAudioIndicator(false);
