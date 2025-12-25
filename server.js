@@ -33,7 +33,7 @@ const io = new Server(server, {
 });
 
 // Хранилище комнат и пользователей
-const rooms = new Map(); // roomId -> { users: Set, host: socketId }
+const rooms = new Map(); // roomId -> { users: Set }
 
 // Статические файлы
 app.use(express.static(path.join(__dirname)));
@@ -55,9 +55,7 @@ io.on('connection', (socket) => {
     socket.on('create-room', ({ username }) => {
         const roomId = generateRoomId();
         rooms.set(roomId, {
-            users: new Set([socket.id]),
-            host: socket.id,
-            usernames: new Map([[socket.id, username]])
+            users: new Set([socket.id])
         });
         
         socket.join(roomId);
@@ -80,7 +78,6 @@ io.on('connection', (socket) => {
         }
 
         room.users.add(socket.id);
-        room.usernames.set(socket.id, username);
         socket.join(roomId);
         
         socket.emit('room-joined', { roomId });
@@ -89,10 +86,7 @@ io.on('connection', (socket) => {
         if (room.users.size === 2) {
             const otherUser = Array.from(room.users).find(id => id !== socket.id);
             if (otherUser) {
-                io.to(otherUser).emit('user-joined', { 
-                    username,
-                    socketId: socket.id 
-                });
+                io.to(otherUser).emit('user-joined', { username });
             }
         }
         
@@ -151,7 +145,6 @@ io.on('connection', (socket) => {
         const room = rooms.get(roomId);
         if (room) {
             room.users.delete(socket.id);
-            room.usernames.delete(socket.id);
             
             // Уведомляем других пользователей
             socket.to(roomId).emit('user-left');
@@ -174,7 +167,6 @@ io.on('connection', (socket) => {
         for (const [roomId, room] of rooms.entries()) {
             if (room.users.has(socket.id)) {
                 room.users.delete(socket.id);
-                room.usernames.delete(socket.id);
                 
                 // Уведомляем других пользователей
                 socket.to(roomId).emit('user-left');

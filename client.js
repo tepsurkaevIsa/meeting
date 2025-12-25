@@ -15,7 +15,6 @@ class AudioCallClient {
         this.username = null;
         this.isMuted = false;
         this.iceCandidatesQueue = [];
-        this.isInitiator = false;
         this.remoteAudio = null;
         
         this.initializeElements();
@@ -82,7 +81,6 @@ class AudioCallClient {
 
         this.socket.on('user-joined', async (data) => {
             this.updateStatus('Пользователь присоединился. Установка соединения...', 'connecting');
-            this.isInitiator = true;
             this.iceCandidatesQueue = [];
             await this.createPeerConnection();
             await this.startLocalStream();
@@ -96,7 +94,6 @@ class AudioCallClient {
         });
 
         this.socket.on('offer', async (data) => {
-            this.isInitiator = false;
             this.iceCandidatesQueue = [];
             if (!this.peerConnection) {
                 await this.createPeerConnection();
@@ -178,16 +175,7 @@ class AudioCallClient {
                     noiseSuppression: true,
                     autoGainControl: true,
                     sampleRate: 48000, // Высокое качество (48kHz)
-                    channelCount: 1, // Моно для голоса
-                    latency: 0, // Минимальная задержка
-                    sampleSize: 16,
-                    // Дополнительные параметры для лучшего качества
-                    googEchoCancellation: true,
-                    googNoiseSuppression: true,
-                    googAutoGainControl: true,
-                    googHighpassFilter: true,
-                    googTypingNoiseDetection: true,
-                    googNoiseReduction: true
+                    channelCount: 1 // Моно для голоса
                 },
                 video: false
             });
@@ -466,45 +454,8 @@ class AudioCallClient {
                         this.remoteAudio.play().then(() => {
                             console.log('✅ Удаленное аудио воспроизводится!');
                             
-                            // ВАЖНО: Проверяем статистику соединения
-                            setTimeout(() => {
-                                this.checkConnectionStats();
-                            }, 2000);
-                            
-                            // Периодическая проверка статистики
-                            const statsInterval = setInterval(() => {
-                                if (this.peerConnection && this.remoteStream) {
-                                    this.checkConnectionStats();
-                                } else {
-                                    clearInterval(statsInterval);
-                                }
-                            }, 5000);
-                            
-                            // Останавливаем проверку через 60 секунд
-                            setTimeout(() => {
-                                clearInterval(statsInterval);
-                            }, 60000);
-                            
                             // Запускаем мониторинг аудио потока
                             this.startRemoteAudioMonitoring(stream);
-                            
-                            // Дополнительная проверка: убеждаемся, что Audio элемент действительно воспроизводит
-                            setTimeout(() => {
-                                if (this.remoteAudio && !this.remoteAudio.paused) {
-                                    console.log('Проверка Audio элемента через 1 секунду:', {
-                                        paused: this.remoteAudio.paused,
-                                        muted: this.remoteAudio.muted,
-                                        volume: this.remoteAudio.volume,
-                                        currentTime: this.remoteAudio.currentTime,
-                                        readyState: this.remoteAudio.readyState
-                                    });
-                                    
-                                    // Проверяем, есть ли реальные данные
-                                    if (this.remoteAudio.currentTime === 0 && this.remoteAudio.readyState >= 2) {
-                                        console.warn('⚠️ Audio элемент не воспроизводит - возможно нет данных');
-                                    }
-                                }
-                            }, 1000);
                             
                             this.updateStatus('Соединение установлено', 'connected');
                             this.remoteUsernameEl.textContent = 'Пользователь подключен';
@@ -601,12 +552,7 @@ class AudioCallClient {
                     console.error('Signaling state:', signalingState);
                     
                     // Проверяем, есть ли активные треки - если есть, продолжаем работу
-                    const hasActiveTracks = this.remoteStream && 
-                        this.remoteStream.getAudioTracks().some(t => 
-                            t.readyState === 'live' && t.enabled && !t.muted
-                        );
-                    
-                    if (hasActiveTracks) {
+                    if (this.hasActiveTracks()) {
                         console.warn('⚠️ Connection failed, но треки активны - продолжаем работу');
                         this.updateStatus('Соединение установлено (нестабильное)', 'connected');
                         // Не прерываем работу, если треки работают
@@ -707,38 +653,18 @@ class AudioCallClient {
                 }).catch(e => console.error('Ошибка проверки TURN:', e));
                 
                 // Проверяем, есть ли активные треки - если есть, продолжаем работу
-                const hasActiveTracks = this.remoteStream && 
-                    this.remoteStream.getAudioTracks().some(t => 
-                        t.readyState === 'live' && t.enabled && !t.muted
-                    );
-                
-                if (hasActiveTracks) {
+                if (this.hasActiveTracks()) {
                     console.warn('⚠️ ICE failed, но треки активны - продолжаем работу');
                     this.updateStatus('Соединение установлено (нестабильное)', 'connected');
                     return; // Не прерываем работу
                 }
                 
                 this.updateStatus('Ошибка соединения. Попробуйте переподключиться или проверьте интернет.', 'connecting');
-                
-                // Не делаем автоматический hangup, если треки работают
-                setTimeout(() => {
-                    if (this.peerConnection && 
-                        this.peerConnection.iceConnectionState === 'failed' &&
-                        !hasActiveTracks) {
-                        console.log('Попытка восстановления соединения...');
-                        // Не делаем hangup автоматически, пусть пользователь сам решит
-                    }
-                }, 5000);
             } else if (state === 'disconnected') {
                 console.warn('⚠️ ICE соединение disconnected');
                 
                 // Проверяем, есть ли активные треки
-                const hasActiveTracks = this.remoteStream && 
-                    this.remoteStream.getAudioTracks().some(t => 
-                        t.readyState === 'live' && t.enabled && !t.muted
-                    );
-                
-                if (hasActiveTracks) {
+                if (this.hasActiveTracks()) {
                     console.warn('⚠️ ICE disconnected, но треки активны - продолжаем работу');
                     this.updateStatus('Соединение установлено (нестабильное)', 'connected');
                     return;
@@ -1036,41 +962,26 @@ class AudioCallClient {
             const stats = await this.peerConnection.getStats();
             let bytesReceived = 0;
             let bytesSent = 0;
-            let packetsReceived = 0;
-            let packetsSent = 0;
             let hasActiveConnection = false;
-            let jitter = 0;
             let packetsLost = 0;
 
             stats.forEach(report => {
                 if (report.type === 'inbound-rtp' && report.mediaType === 'audio') {
                     bytesReceived = report.bytesReceived || 0;
-                    packetsReceived = report.packetsReceived || 0;
-                    jitter = report.jitter || 0;
                     packetsLost = report.packetsLost || 0;
                     hasActiveConnection = true;
                     
-                    // Логируем только если есть данные или проблемы
-                    if (bytesReceived > 0 || packetsLost > 0) {
+                    // Логируем только если есть проблемы
+                    if (packetsLost > 0) {
                         console.log('📊 Входящий RTP:', {
                             bytes: bytesReceived,
-                            packets: packetsReceived,
-                            jitter: jitter.toFixed(3),
+                            jitter: (report.jitter || 0).toFixed(3),
                             lost: packetsLost
                         });
                     }
                 }
                 if (report.type === 'outbound-rtp' && report.mediaType === 'audio') {
                     bytesSent = report.bytesSent || 0;
-                    packetsSent = report.packetsSent || 0;
-                    
-                    // Логируем только если есть данные
-                    if (bytesSent > 0) {
-                        console.log('📊 Исходящий RTP:', {
-                            bytes: bytesSent,
-                            packets: packetsSent
-                        });
-                    }
                 }
             });
 
@@ -1105,7 +1016,6 @@ class AudioCallClient {
             source.connect(analyser);
 
             let silentCount = 0;
-            let activeCount = 0;
 
             const checkRemoteAudioLevel = () => {
                 if (!this.remoteStream || !stream) return;
@@ -1115,7 +1025,6 @@ class AudioCallClient {
                 const level = average / 255;
 
                 if (level > 0.01) {
-                    activeCount++;
                     silentCount = 0;
                 } else {
                     silentCount++;
@@ -1206,7 +1115,6 @@ class AudioCallClient {
         }
         
         this.iceCandidatesQueue = [];
-        this.isInitiator = false;
         this.updateAudioIndicator(false);
         this.showAudioStatus(false);
     }
@@ -1259,6 +1167,14 @@ class AudioCallClient {
                 this.audioStatus.style.display = 'none';
             }
         }
+    }
+
+    // Вспомогательный метод для проверки активных треков
+    hasActiveTracks() {
+        return this.remoteStream && 
+            this.remoteStream.getAudioTracks().some(t => 
+                t.readyState === 'live' && t.enabled && !t.muted
+            );
     }
 }
 
