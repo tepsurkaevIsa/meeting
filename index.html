@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Аудиозвонки 1-на-1</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="call-box">
+            <h1>🎤 Аудиозвонок</h1>
+            
+            <div class="user-section">
+                <div class="user-info">
+                    <div class="avatar" id="localAvatar">Вы</div>
+                    <p class="username" id="localUsername">Ваше имя</p>
+                </div>
+            </div>
+
+            <div class="connection-section" id="connectionSection">
+                <div class="input-group">
+                    <label for="usernameInput">Ваше имя:</label>
+                    <input type="text" id="usernameInput" placeholder="Введите ваше имя" maxlength="20">
+                </div>
+                
+                <div class="input-group">
+                    <label for="roomIdInput">ID комнаты:</label>
+                    <input type="text" id="roomIdInput" placeholder="Введите ID комнаты" maxlength="20">
+                </div>
+                
+                <button id="joinBtn" class="btn btn-primary">Присоединиться</button>
+                <button id="createBtn" class="btn btn-secondary">Создать комнату</button>
+            </div>
+
+            <div class="call-section hidden" id="callSection">
+                <div class="status" id="status">Подключение...</div>
+                
+                <div class="remote-user">
+                    <div class="avatar remote" id="remoteAvatar">Ожидание...</div>
+                    <p class="username" id="remoteUsername">Ожидание пользователя</p>
+                </div>
+
+                <div class="controls">
+                    <button id="muteBtn" class="btn btn-control">
+                        <span class="icon">🔇</span>
+                        <span>Включить микрофон</span>
+                    </button>
+                    <button id="hangupBtn" class="btn btn-danger">
+                        <span class="icon">📞</span>
+                        <span>Завершить звонок</span>
+                    </button>
+                </div>
+
+                <div class="room-info">
+                    <p>ID комнаты: <strong id="currentRoomId"></strong></p>
+                    <button id="copyRoomIdBtn" class="btn btn-link">Скопировать ID</button>
+                </div>
+            </div>
+
+            <div class="audio-indicator">
+                <div class="audio-wave" id="audioWave"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="client.js"></script>
+</body>
+</html>
+
