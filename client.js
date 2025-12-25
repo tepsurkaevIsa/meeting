@@ -358,15 +358,37 @@ class AudioCallClient {
                                 this.remoteAudio.srcObject = stream;
                             }
                             
-                            this.remoteAudio.play().then(() => {
-                                console.log('✅ Воспроизведение начато после unmute');
-                                this.showAudioStatus(true);
-                                this.updateStatus('Соединение установлено', 'connected');
-                            }).catch(e => {
-                                console.error('Ошибка воспроизведения после unmute:', e);
-                                // Показываем подсказку пользователю
-                                this.updateStatus('Соединение установлено. Кликните для воспроизведения звука', 'connected');
+                        this.remoteAudio.play().then(() => {
+                            console.log('✅ Воспроизведение начато после unmute');
+                            console.log('Audio element state:', {
+                                paused: this.remoteAudio.paused,
+                                muted: this.remoteAudio.muted,
+                                volume: this.remoteAudio.volume,
+                                currentTime: this.remoteAudio.currentTime,
+                                readyState: this.remoteAudio.readyState
                             });
+                            
+                            // Проверяем треки в потоке
+                            const tracks = stream.getAudioTracks();
+                            tracks.forEach((t, i) => {
+                                console.log(`Трек ${i} после unmute:`, {
+                                    id: t.id,
+                                    enabled: t.enabled,
+                                    muted: t.muted,
+                                    readyState: t.readyState
+                                });
+                            });
+                            
+                            // Запускаем мониторинг аудио потока
+                            this.startRemoteAudioMonitoring(stream);
+                            
+                            this.showAudioStatus(true);
+                            this.updateStatus('Соединение установлено', 'connected');
+                        }).catch(e => {
+                            console.error('Ошибка воспроизведения после unmute:', e);
+                            // Показываем подсказку пользователю
+                            this.updateStatus('Соединение установлено. Кликните для воспроизведения звука', 'connected');
+                        });
                         }
                     }
                 };
@@ -376,11 +398,33 @@ class AudioCallClient {
                 // Проверяем начальное состояние
                 if (track.muted) {
                     console.warn('⚠️ ВНИМАНИЕ: Трек приходит с muted=true!');
-                    console.warn('Это может означать, что удаленный пользователь не говорит или микрофон выключен');
+                    console.warn('Это может означать:');
+                    console.warn('1. Удаленный пользователь не говорит в микрофон');
+                    console.warn('2. Микрофон выключен на стороне отправителя');
+                    console.warn('3. Трек еще не активирован');
+                    console.warn('Ожидание события unmute...');
                     this.updateStatus('Соединение установлено. Ожидание звука от собеседника...', 'connected');
                 } else {
                     console.log('✅ Трек не muted, звук должен передаваться');
                 }
+                
+                // Дополнительная проверка: следим за изменениями muted состояния
+                let muteCheckInterval = setInterval(() => {
+                    if (track.muted) {
+                        console.warn('⚠️ Трек все еще muted. Проверьте на стороне отправителя:');
+                        console.warn('- Микрофон включен?');
+                        console.warn('- Пользователь говорит?');
+                        console.warn('- Разрешения на микрофон даны?');
+                    } else {
+                        console.log('✅ Трек больше не muted');
+                        clearInterval(muteCheckInterval);
+                    }
+                }, 2000);
+                
+                // Останавливаем проверку через 30 секунд
+                setTimeout(() => {
+                    clearInterval(muteCheckInterval);
+                }, 30000);
                 
                 // Создаем или обновляем audio элемент
                 if (!this.remoteAudio) {
@@ -457,8 +501,28 @@ class AudioCallClient {
                         
                         this.remoteAudio.play().then(() => {
                             console.log('✅ Удаленное аудио воспроизводится!');
-                            console.log('Audio paused:', this.remoteAudio.paused);
-                            console.log('Audio currentTime:', this.remoteAudio.currentTime);
+                            console.log('Audio element state:', {
+                                paused: this.remoteAudio.paused,
+                                muted: this.remoteAudio.muted,
+                                volume: this.remoteAudio.volume,
+                                currentTime: this.remoteAudio.currentTime,
+                                readyState: this.remoteAudio.readyState
+                            });
+                            
+                            // Проверяем треки в потоке
+                            const tracks = stream.getAudioTracks();
+                            tracks.forEach((t, i) => {
+                                console.log(`Трек ${i}:`, {
+                                    id: t.id,
+                                    enabled: t.enabled,
+                                    muted: t.muted,
+                                    readyState: t.readyState
+                                });
+                            });
+                            
+                            // Запускаем мониторинг аудио потока
+                            this.startRemoteAudioMonitoring(stream);
+                            
                             this.updateStatus('Соединение установлено', 'connected');
                             this.remoteUsernameEl.textContent = 'Пользователь подключен';
                             this.showAudioStatus(true);
@@ -787,6 +851,63 @@ class AudioCallClient {
         };
 
         checkAudioLevel();
+    }
+
+    startRemoteAudioMonitoring(stream) {
+        if (!stream) return;
+
+        try {
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const analyser = audioContext.createAnalyser();
+            const source = audioContext.createMediaStreamSource(stream);
+            const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+            analyser.smoothingTimeConstant = 0.8;
+            analyser.fftSize = 1024;
+            source.connect(analyser);
+
+            let silentCount = 0;
+            let activeCount = 0;
+
+            const checkRemoteAudioLevel = () => {
+                if (!this.remoteStream || !stream) return;
+
+                analyser.getByteFrequencyData(dataArray);
+                const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+                const level = average / 255;
+
+                if (level > 0.01) {
+                    activeCount++;
+                    if (activeCount % 50 === 0) {
+                        console.log('🔊 Удаленное аудио активно, уровень:', level.toFixed(3));
+                    }
+                    silentCount = 0;
+                } else {
+                    silentCount++;
+                    if (silentCount === 100) {
+                        console.warn('⚠️ Удаленное аудио тихое или отсутствует уже 100 проверок');
+                        console.warn('Проверьте, что собеседник говорит в микрофон');
+                    }
+                }
+
+                // Проверяем состояние треков
+                const tracks = stream.getAudioTracks();
+                tracks.forEach((t, i) => {
+                    if (t.muted && activeCount > 0) {
+                        console.warn(`⚠️ Трек ${i} стал muted во время воспроизведения!`);
+                    }
+                });
+
+                if (this.remoteStream && stream) {
+                    requestAnimationFrame(checkRemoteAudioLevel);
+                }
+            };
+
+            checkRemoteAudioLevel();
+            console.log('Мониторинг удаленного аудио запущен');
+        } catch (error) {
+            console.error('Ошибка запуска мониторинга удаленного аудио:', error);
+        }
     }
 
     toggleMute() {
