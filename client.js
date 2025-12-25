@@ -261,30 +261,43 @@ class AudioCallClient {
 
         const configuration = {
             iceServers: [
+                // STUN серверы
                 { urls: 'stun:stun.l.google.com:19302' },
                 { urls: 'stun:stun1.l.google.com:19302' },
                 { urls: 'stun:stun2.l.google.com:19302' },
                 { urls: 'stun:stun3.l.google.com:19302' },
                 { urls: 'stun:stun4.l.google.com:19302' },
-                // Добавляем бесплатный TURN сервер для обхода NAT
+                // TURN серверы (бесплатные)
                 {
-                    urls: 'turn:openrelay.metered.ca:80',
+                    urls: [
+                        'turn:openrelay.metered.ca:80',
+                        'turn:openrelay.metered.ca:443',
+                        'turn:openrelay.metered.ca:443?transport=tcp'
+                    ],
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                },
+                // Дополнительные TURN серверы
+                {
+                    urls: 'turn:relay.metered.ca:80',
                     username: 'openrelayproject',
                     credential: 'openrelayproject'
                 },
                 {
-                    urls: 'turn:openrelay.metered.ca:443',
+                    urls: 'turn:relay.metered.ca:443',
                     username: 'openrelayproject',
                     credential: 'openrelayproject'
                 },
                 {
-                    urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+                    urls: 'turn:relay.metered.ca:443?transport=tcp',
                     username: 'openrelayproject',
                     credential: 'openrelayproject'
                 }
             ],
             iceCandidatePoolSize: 10,
-            iceTransportPolicy: 'all' // Пробуем и STUN и TURN
+            iceTransportPolicy: 'all', // Пробуем и STUN и TURN
+            bundlePolicy: 'max-bundle',
+            rtcpMuxPolicy: 'require'
         };
 
         this.peerConnection = new RTCPeerConnection(configuration);
@@ -532,8 +545,21 @@ class AudioCallClient {
                     console.error('ICE gathering state:', iceGatheringState);
                     console.error('Signaling state:', signalingState);
                     
+                    // Проверяем, есть ли активные треки - если есть, продолжаем работу
+                    const hasActiveTracks = this.remoteStream && 
+                        this.remoteStream.getAudioTracks().some(t => 
+                            t.readyState === 'live' && t.enabled && !t.muted
+                        );
+                    
+                    if (hasActiveTracks) {
+                        console.warn('⚠️ Connection failed, но треки активны - продолжаем работу');
+                        this.updateStatus('Соединение установлено (нестабильное)', 'connected');
+                        // Не прерываем работу, если треки работают
+                        return;
+                    }
+                    
                     // Проверяем, какие кандидаты собраны
-                    const stats = this.peerConnection.getStats().then(stats => {
+                    this.peerConnection.getStats().then(stats => {
                         let hasHost = false;
                         let hasSrflx = false;
                         let hasRelay = false;
@@ -552,15 +578,14 @@ class AudioCallClient {
                             relay: hasRelay
                         });
                         
-                        if (!hasRelay && iceState === 'failed') {
-                            console.warn('⚠️ TURN сервер не используется, возможно проблема с NAT');
+                        if (!hasRelay) {
+                            console.warn('⚠️ TURN сервер не используется!');
+                            console.warn('Это может быть причиной failed соединения при строгом NAT');
+                            console.warn('Попробуйте использовать другую сеть или VPN');
                         }
                     }).catch(e => console.error('Ошибка получения stats:', e));
                     
                     this.updateStatus('Ошибка соединения. Попробуйте переподключиться.', 'connecting');
-                    
-                    // Не показываем alert сразу, чтобы не мешать пользователю
-                    // Вместо этого показываем в статусе
                     break;
                 case 'closed':
                     console.log('Соединение закрыто');
@@ -590,20 +615,58 @@ class AudioCallClient {
                 console.error('Возможные причины:');
                 console.error('1. Проблемы с NAT/firewall - нужен TURN сервер');
                 console.error('2. Нестабильное интернет-соединение');
-                console.error('3. Проблемы с STUN серверами');
+                console.error('3. Проблемы с STUN/TURN серверами');
+                
+                // Проверяем, есть ли активные треки - если есть, продолжаем работу
+                const hasActiveTracks = this.remoteStream && 
+                    this.remoteStream.getAudioTracks().some(t => 
+                        t.readyState === 'live' && t.enabled && !t.muted
+                    );
+                
+                if (hasActiveTracks) {
+                    console.warn('⚠️ ICE failed, но треки активны - продолжаем работу');
+                    this.updateStatus('Соединение установлено (нестабильное)', 'connected');
+                    return; // Не прерываем работу
+                }
+                
                 this.updateStatus('Ошибка соединения. Попробуйте переподключиться или проверьте интернет.', 'connecting');
                 
-                // Попытка переподключения
+                // Не делаем автоматический hangup, если треки работают
                 setTimeout(() => {
-                    if (this.peerConnection && this.peerConnection.iceConnectionState === 'failed') {
+                    if (this.peerConnection && 
+                        this.peerConnection.iceConnectionState === 'failed' &&
+                        !hasActiveTracks) {
                         console.log('Попытка восстановления соединения...');
-                        this.hangup();
-                        this.updateStatus('Соединение разорвано. Создайте новую комнату.', 'connecting');
+                        // Не делаем hangup автоматически, пусть пользователь сам решит
                     }
-                }, 3000);
+                }, 5000);
             } else if (state === 'disconnected') {
                 console.warn('⚠️ ICE соединение disconnected');
+                
+                // Проверяем, есть ли активные треки
+                const hasActiveTracks = this.remoteStream && 
+                    this.remoteStream.getAudioTracks().some(t => 
+                        t.readyState === 'live' && t.enabled && !t.muted
+                    );
+                
+                if (hasActiveTracks) {
+                    console.warn('⚠️ ICE disconnected, но треки активны - продолжаем работу');
+                    this.updateStatus('Соединение установлено (нестабильное)', 'connected');
+                    return;
+                }
+                
+                console.warn('Попытка восстановления...');
                 this.updateStatus('Соединение прервано. Ожидание восстановления...', 'connecting');
+                
+                // Ждем немного, может восстановится
+                setTimeout(() => {
+                    if (this.peerConnection && this.peerConnection.iceConnectionState === 'disconnected') {
+                        console.warn('Соединение не восстановилось, возможно нужно переподключиться');
+                    }
+                }, 5000);
+            } else if (state === 'connected' || state === 'completed') {
+                console.log('✅ ICE соединение установлено:', state);
+                this.updateStatus('Соединение установлено', 'connected');
             }
         };
     }
