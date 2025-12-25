@@ -204,10 +204,8 @@ class AudioCallClient {
                 );
                 if (!sender) {
                     console.log('Добавление локального трека в peer connection');
-                    const newSender = this.peerConnection.addTrack(track, this.localStream);
-                    
-                    // Настраиваем параметры кодека для лучшего качества
-                    this.configureAudioCodec(newSender);
+                    this.peerConnection.addTrack(track, this.localStream);
+                    // configureAudioCodec будет вызван после установки localDescription
                 } else {
                     console.log('Трек уже добавлен в peer connection');
                     // Обновляем трек в sender, если нужно
@@ -215,8 +213,6 @@ class AudioCallClient {
                         console.log('Замена трека в sender');
                         sender.replaceTrack(track);
                     }
-                    // Настраиваем параметры кодека
-                    this.configureAudioCodec(sender);
                 }
             });
             
@@ -287,14 +283,7 @@ class AudioCallClient {
 
         this.peerConnection = new RTCPeerConnection(configuration);
         
-        // Настраиваем параметры для всех senders после создания соединения
-        this.peerConnection.addEventListener('negotiationneeded', () => {
-            this.peerConnection.getSenders().forEach(sender => {
-                if (sender.track && sender.track.kind === 'audio') {
-                    this.configureAudioCodec(sender);
-                }
-            });
-        });
+        // configureAudioCodec будет вызван после установки localDescription
 
         // Обработка удаленного потока
         this.peerConnection.ontrack = (event) => {
@@ -750,10 +739,20 @@ class AudioCallClient {
                 offerToReceiveVideo: false
             });
             
-            // Модифицируем SDP для лучшего качества
+            // Модифицируем SDP перед установкой (минимальные изменения)
             offer.sdp = this.modifySDPForQuality(offer.sdp);
             
             await this.peerConnection.setLocalDescription(offer);
+            
+            // Настраиваем параметры кодека после установки localDescription
+            setTimeout(() => {
+                this.peerConnection.getSenders().forEach(sender => {
+                    if (sender.track && sender.track.kind === 'audio') {
+                        this.configureAudioCodec(sender);
+                    }
+                });
+            }, 100);
+            
             console.log('✅ Offer создан и отправлен');
             
             this.socket.emit('offer', {
@@ -766,86 +765,37 @@ class AudioCallClient {
     }
     
     modifySDPForQuality(sdp) {
+        // Безопасная модификация SDP - только добавляем параметры fmtp, не меняем структуру
         let modifiedSDP = sdp;
         let opusPayloadType = null;
         
-        // Находим Opus кодек (может быть с каналами или без)
-        const opusRegex1 = /a=rtpmap:(\d+) opus\/(\d+)\/(\d+)/g; // С каналами
-        const opusRegex2 = /a=rtpmap:(\d+) opus\/(\d+)/g; // Без каналов
-        
-        // Сначала ищем с каналами
-        modifiedSDP = modifiedSDP.replace(opusRegex1, (match, payload, clockRate, channels) => {
-            opusPayloadType = payload;
-            // Устанавливаем 48kHz и моно для голоса (моно лучше для голоса, меньше битрейт)
-            return `a=rtpmap:${payload} opus/48000/1`;
-        });
-        
-        // Если не нашли, ищем без каналов
-        if (!opusPayloadType) {
-            modifiedSDP = modifiedSDP.replace(opusRegex2, (match, payload, clockRate) => {
-                opusPayloadType = payload;
-                return `a=rtpmap:${payload} opus/48000/1`;
-            });
-        }
-        
-        // Улучшаем параметры fmtp для Opus
-        if (opusPayloadType) {
-            const fmtpRegex = new RegExp(`a=fmtp:${opusPayloadType}\\s+([^\\r\\n]+)`, 'g');
-            modifiedSDP = modifiedSDP.replace(fmtpRegex, (match, params) => {
-                let newParams = params;
-                
-                // Включаем FEC (Forward Error Correction) для устойчивости к потере пакетов
-                if (!newParams.includes('useinbandfec=1')) {
-                    newParams += ';useinbandfec=1';
-                }
-                
-                // Минимальное время пакета для лучшего качества
-                if (!newParams.includes('minptime=')) {
-                    newParams += ';minptime=10';
-                }
-                
-                // Высокий битрейт для лучшего качества (48-64 kbps для голоса)
-                if (!newParams.includes('maxaveragebitrate=')) {
-                    newParams += ';maxaveragebitrate=64000';
-                }
-                
-                // Устанавливаем сложность кодирования (10 для лучшего качества)
-                if (!newParams.includes('complexity=')) {
-                    newParams += ';complexity=10';
-                }
-                
-                // Дополнительные параметры для качества
-                if (!newParams.includes('stereo=')) {
-                    newParams += ';stereo=0'; // Моно для голоса
-                }
-                
-                return `a=fmtp:${opusPayloadType} ${newParams}`;
-            });
+        // Находим Opus кодек (без изменения его формата)
+        const opusRegex = /a=rtpmap:(\d+)\s+opus\/(\d+)(?:\/(\d+))?/;
+        const match = modifiedSDP.match(opusRegex);
+        if (match) {
+            opusPayloadType = match[1];
             
-            // Если fmtp строка еще не существует, добавляем её
-            if (!modifiedSDP.includes(`a=fmtp:${opusPayloadType}`)) {
-                const rtpmapIndex = modifiedSDP.indexOf(`a=rtpmap:${opusPayloadType}`);
-                if (rtpmapIndex !== -1) {
-                    const insertIndex = modifiedSDP.indexOf('\n', rtpmapIndex) + 1;
-                    modifiedSDP = modifiedSDP.slice(0, insertIndex) + 
-                        `a=fmtp:${opusPayloadType} useinbandfec=1;minptime=10;maxaveragebitrate=64000;complexity=10;stereo=0\n` +
-                        modifiedSDP.slice(insertIndex);
-                }
+            // Улучшаем параметры fmtp для Opus (только если строка уже существует)
+            const fmtpRegex = new RegExp(`a=fmtp:${opusPayloadType}\\s+([^\\r\\n]+)`, 'g');
+            const fmtpMatch = modifiedSDP.match(fmtpRegex);
+            
+            if (fmtpMatch) {
+                // Обновляем существующую строку fmtp
+                modifiedSDP = modifiedSDP.replace(fmtpRegex, (match, params) => {
+                    let newParams = params;
+                    
+                    // Добавляем параметры только если их еще нет
+                    if (!newParams.includes('useinbandfec=1')) {
+                        newParams += ';useinbandfec=1';
+                    }
+                    if (!newParams.includes('maxaveragebitrate=')) {
+                        newParams += ';maxaveragebitrate=64000';
+                    }
+                    
+                    return `a=fmtp:${opusPayloadType} ${newParams}`;
+                });
             }
-        }
-        
-        // Переставляем Opus на первое место в списке кодеков
-        const audioLineRegex = /m=audio (\d+) RTP\/SAVPF ([\d\s]+)/;
-        const audioMatch = modifiedSDP.match(audioLineRegex);
-        if (audioMatch && opusPayloadType) {
-            const codecs = audioMatch[2].trim().split(/\s+/);
-            const opusIndex = codecs.indexOf(opusPayloadType);
-            if (opusIndex > 0) {
-                // Перемещаем Opus на первое место
-                codecs.splice(opusIndex, 1);
-                codecs.unshift(opusPayloadType);
-                modifiedSDP = modifiedSDP.replace(audioLineRegex, `m=audio ${audioMatch[1]} RTP/SAVPF ${codecs.join(' ')}`);
-            }
+            // Не добавляем fmtp если его нет - браузер сам установит правильные параметры
         }
         
         return modifiedSDP;
@@ -855,22 +805,25 @@ class AudioCallClient {
         try {
             await this.peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
             
-            // Настраиваем параметры кодека для всех senders
-            this.peerConnection.getSenders().forEach(sender => {
-                if (sender.track && sender.track.kind === 'audio') {
-                    this.configureAudioCodec(sender);
-                }
-            });
-            
             const answer = await this.peerConnection.createAnswer({
                 offerToReceiveAudio: true,
                 offerToReceiveVideo: false
             });
             
-            // Модифицируем SDP для лучшего качества
+            // Модифицируем SDP перед установкой (минимальные изменения)
             answer.sdp = this.modifySDPForQuality(answer.sdp);
             
             await this.peerConnection.setLocalDescription(answer);
+            
+            // Настраиваем параметры кодека после установки localDescription
+            setTimeout(() => {
+                this.peerConnection.getSenders().forEach(sender => {
+                    if (sender.track && sender.track.kind === 'audio') {
+                        this.configureAudioCodec(sender);
+                    }
+                });
+            }, 100);
+            
             console.log('✅ Answer создан и отправлен');
             
             this.socket.emit('answer', {
