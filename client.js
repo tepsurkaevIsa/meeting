@@ -325,14 +325,40 @@ class AudioCallClient {
                     this.updateStatus('Собеседник выключил микрофон', 'connected');
                 };
                 
-                track.onunmute = () => {
-                    console.log('✅ Аудио трек разглушен (unmuted)');
+                // Сохраняем ссылку на функцию playAudio для использования в onunmute
+                const playAudioWhenUnmuted = () => {
+                    console.log('✅ Аудио трек разглушен (unmuted) - запускаем воспроизведение');
                     this.updateStatus('Соединение установлено', 'connected');
-                    // Пытаемся воспроизвести, если было приостановлено
-                    if (this.remoteAudio && this.remoteAudio.paused) {
-                        this.remoteAudio.play().catch(e => console.error('Ошибка воспроизведения:', e));
+                    
+                    // Когда трек становится unmuted, пытаемся воспроизвести
+                    if (this.remoteAudio && this.remoteAudio.srcObject) {
+                        const stream = this.remoteAudio.srcObject;
+                        const activeTracks = stream.getAudioTracks().filter(t => 
+                            t.readyState === 'live' && t.enabled && !t.muted
+                        );
+                        
+                        console.log('Активных треков после unmute:', activeTracks.length);
+                        
+                        if (activeTracks.length > 0) {
+                            // Убеждаемся, что поток установлен
+                            if (this.remoteAudio.srcObject !== stream) {
+                                this.remoteAudio.srcObject = stream;
+                            }
+                            
+                            this.remoteAudio.play().then(() => {
+                                console.log('✅ Воспроизведение начато после unmute');
+                                this.showAudioStatus(true);
+                                this.updateStatus('Соединение установлено', 'connected');
+                            }).catch(e => {
+                                console.error('Ошибка воспроизведения после unmute:', e);
+                                // Показываем подсказку пользователю
+                                this.updateStatus('Соединение установлено. Кликните для воспроизведения звука', 'connected');
+                            });
+                        }
                     }
                 };
+                
+                track.onunmute = playAudioWhenUnmuted;
                 
                 // Проверяем начальное состояние
                 if (track.muted) {
@@ -402,9 +428,18 @@ class AudioCallClient {
                         console.log('Активных треков:', activeTracks.length);
                         
                         if (activeTracks.length === 0) {
-                            console.warn('⚠️ Нет активных треков для воспроизведения');
+                            console.warn('⚠️ Нет активных треков для воспроизведения (трек muted)');
+                            console.warn('Ожидание, когда трек станет unmuted...');
                             this.updateStatus('Соединение установлено. Ожидание звука от собеседника...', 'connected');
+                            
+                            // onunmute уже установлен выше, он вызовет playAudioWhenUnmuted
+                            // Не нужно устанавливать его снова
                             return;
+                        }
+                        
+                        // Устанавливаем поток в audio элемент (на случай, если еще не установлен)
+                        if (this.remoteAudio.srcObject !== stream) {
+                            this.remoteAudio.srcObject = stream;
                         }
                         
                         this.remoteAudio.play().then(() => {
@@ -487,18 +522,45 @@ class AudioCallClient {
                 case 'failed':
                     console.error('❌ Connection state: FAILED');
                     console.error('WebRTC соединение не может установиться');
-                    this.updateStatus('Ошибка соединения. Возможно нужен TURN сервер. Попробуйте переподключиться.', 'connecting');
                     
                     // Показываем более подробную информацию
                     const iceState = this.peerConnection.iceConnectionState;
-                    console.error('ICE connection state:', iceState);
-                    console.error('ICE gathering state:', this.peerConnection.iceGatheringState);
-                    console.error('Signaling state:', this.peerConnection.signalingState);
+                    const iceGatheringState = this.peerConnection.iceGatheringState;
+                    const signalingState = this.peerConnection.signalingState;
                     
-                    // Если это проблема с NAT, предлагаем решение
-                    if (iceState === 'failed') {
-                        alert('Соединение не может установиться. Это может быть из-за строгого NAT или firewall.\n\nПопробуйте:\n1. Переподключиться\n2. Использовать другую сеть\n3. Настроить TURN сервер');
-                    }
+                    console.error('ICE connection state:', iceState);
+                    console.error('ICE gathering state:', iceGatheringState);
+                    console.error('Signaling state:', signalingState);
+                    
+                    // Проверяем, какие кандидаты собраны
+                    const stats = this.peerConnection.getStats().then(stats => {
+                        let hasHost = false;
+                        let hasSrflx = false;
+                        let hasRelay = false;
+                        
+                        stats.forEach(report => {
+                            if (report.type === 'local-candidate' || report.type === 'remote-candidate') {
+                                if (report.candidateType === 'host') hasHost = true;
+                                if (report.candidateType === 'srflx') hasSrflx = true;
+                                if (report.candidateType === 'relay') hasRelay = true;
+                            }
+                        });
+                        
+                        console.log('ICE кандидаты:', {
+                            host: hasHost,
+                            srflx: hasSrflx,
+                            relay: hasRelay
+                        });
+                        
+                        if (!hasRelay && iceState === 'failed') {
+                            console.warn('⚠️ TURN сервер не используется, возможно проблема с NAT');
+                        }
+                    }).catch(e => console.error('Ошибка получения stats:', e));
+                    
+                    this.updateStatus('Ошибка соединения. Попробуйте переподключиться.', 'connecting');
+                    
+                    // Не показываем alert сразу, чтобы не мешать пользователю
+                    // Вместо этого показываем в статусе
                     break;
                 case 'closed':
                     console.log('Соединение закрыто');
