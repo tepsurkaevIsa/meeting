@@ -171,25 +171,30 @@ class AudioCallClient {
                 this.localStream.getTracks().forEach(track => track.stop());
             }
 
+            // Оптимальные настройки для высокого качества аудио
             this.localStream = await navigator.mediaDevices.getUserMedia({
                 audio: {
                     echoCancellation: true,
                     noiseSuppression: true,
-                    autoGainControl: true
+                    autoGainControl: true,
+                    sampleRate: 48000, // Высокое качество (48kHz)
+                    channelCount: 1, // Моно для голоса
+                    latency: 0, // Минимальная задержка
+                    sampleSize: 16,
+                    // Дополнительные параметры для лучшего качества
+                    googEchoCancellation: true,
+                    googNoiseSuppression: true,
+                    googAutoGainControl: true,
+                    googHighpassFilter: true,
+                    googTypingNoiseDetection: true,
+                    googNoiseReduction: true
                 },
                 video: false
             });
             
             // Добавляем аудио треки в peer connection только если они еще не добавлены
             this.localStream.getTracks().forEach(track => {
-                console.log('Локальный трек:', {
-                    kind: track.kind,
-                    id: track.id,
-                    enabled: track.enabled,
-                    readyState: track.readyState,
-                    muted: track.muted,
-                    label: track.label
-                });
+                console.log('✅ Локальный аудио трек получен:', track.label || track.id);
                 
                 // ВАЖНО: Убеждаемся, что трек не muted
                 if (track.muted) {
@@ -211,7 +216,10 @@ class AudioCallClient {
                 );
                 if (!sender) {
                     console.log('Добавление локального трека в peer connection');
-                    this.peerConnection.addTrack(track, this.localStream);
+                    const newSender = this.peerConnection.addTrack(track, this.localStream);
+                    
+                    // Настраиваем параметры кодека для лучшего качества
+                    this.configureAudioCodec(newSender);
                 } else {
                     console.log('Трек уже добавлен в peer connection');
                     // Обновляем трек в sender, если нужно
@@ -219,22 +227,14 @@ class AudioCallClient {
                         console.log('Замена трека в sender');
                         sender.replaceTrack(track);
                     }
+                    // Настраиваем параметры кодека
+                    this.configureAudioCodec(sender);
                 }
             });
             
             // Проверяем senders после добавления
             const senders = this.peerConnection.getSenders();
-            console.log('Всего senders:', senders.length);
-            senders.forEach((sender, index) => {
-                if (sender.track) {
-                    console.log(`Sender ${index}:`, {
-                        kind: sender.track.kind,
-                        id: sender.track.id,
-                        enabled: sender.track.enabled,
-                        readyState: sender.track.readyState
-                    });
-                }
-            });
+            console.log(`✅ Добавлено ${senders.length} sender(s) в peer connection`);
             
             this.updateAudioIndicator(true);
             this.startAudioLevelMonitoring();
@@ -263,15 +263,13 @@ class AudioCallClient {
         // Если не работает, можно попробовать 'all' для использования и STUN и TURN
         const useRelayOnly = false; // Установите true, если нужно использовать только TURN
         
+        // Оптимальная конфигурация для высокого качества аудио
         const configuration = {
             iceServers: [
-                // STUN серверы (только если не используем только TURN)
-                ...(useRelayOnly ? [] : [
-                    { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' },
-                    { urls: 'stun:stun2.l.google.com:19302' }
-                ]),
-                // TURN серверы (приоритет для обхода NAT)
+                // STUN серверы (для прямого соединения)
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+                // TURN серверы (для обхода NAT, только если нужно)
                 {
                     urls: [
                         'turn:openrelay.metered.ca:80',
@@ -280,51 +278,35 @@ class AudioCallClient {
                     ],
                     username: 'openrelayproject',
                     credential: 'openrelayproject'
-                },
-                {
-                    urls: [
-                        'turn:relay.metered.ca:80',
-                        'turn:relay.metered.ca:443',
-                        'turn:relay.metered.ca:443?transport=tcp'
-                    ],
-                    username: 'openrelayproject',
-                    credential: 'openrelayproject'
-                },
-                // Дополнительные TURN серверы
-                {
-                    urls: 'turn:openrelay.metered.ca:80?transport=udp',
-                    username: 'openrelayproject',
-                    credential: 'openrelayproject'
-                },
-                {
-                    urls: 'turn:openrelay.metered.ca:80?transport=tcp',
-                    username: 'openrelayproject',
-                    credential: 'openrelayproject'
                 }
             ],
-            iceCandidatePoolSize: 10,
-            iceTransportPolicy: useRelayOnly ? 'relay' : 'all', // Используем 'relay' только если нужно
-            bundlePolicy: 'max-bundle',
-            rtcpMuxPolicy: 'require'
+            iceCandidatePoolSize: 0, // Отключаем предварительный сбор кандидатов для меньшей задержки
+            iceTransportPolicy: 'all', // Пробуем сначала прямое соединение, потом TURN
+            bundlePolicy: 'max-bundle', // Объединяем потоки для эффективности
+            rtcpMuxPolicy: 'require', // Обязательный RTCP mux для меньшей задержки
+            // Дополнительные настройки для качества
+            sdpSemantics: 'unified-plan' // Современный стандарт
         };
         
-        console.log('ICE конфигурация:', {
+        console.log('🔧 ICE конфигурация:', {
             iceTransportPolicy: configuration.iceTransportPolicy,
             iceServersCount: configuration.iceServers.length
         });
 
         this.peerConnection = new RTCPeerConnection(configuration);
+        
+        // Настраиваем параметры для всех senders после создания соединения
+        this.peerConnection.addEventListener('negotiationneeded', () => {
+            this.peerConnection.getSenders().forEach(sender => {
+                if (sender.track && sender.track.kind === 'audio') {
+                    this.configureAudioCodec(sender);
+                }
+            });
+        });
 
         // Обработка удаленного потока
         this.peerConnection.ontrack = (event) => {
-            console.log('=== Получен удаленный трек ===');
-            console.log('Event:', event);
-            console.log('Track:', event.track);
-            console.log('Track kind:', event.track.kind);
-            console.log('Track id:', event.track.id);
-            console.log('Track enabled:', event.track.enabled);
-            console.log('Track readyState:', event.track.readyState);
-            console.log('Streams:', event.streams);
+            console.log('✅ Получен удаленный аудио трек');
             
             // Получаем поток из события
             const stream = event.streams[0] || event.stream;
@@ -338,8 +320,8 @@ class AudioCallClient {
             
             // Обрабатываем трек
             const track = event.track;
-            if (track.kind === 'audio') {
-                console.log('Обработка аудио трека:', track.id);
+                if (track.kind === 'audio') {
+                console.log('🎵 Обработка аудио трека');
                 
                 // Следим за изменениями состояния трека
                 track.onended = () => {
@@ -373,64 +355,9 @@ class AudioCallClient {
                             
                         this.remoteAudio.play().then(() => {
                             console.log('✅ Воспроизведение начато после unmute');
-                            console.log('Audio element state:', {
-                                paused: this.remoteAudio.paused,
-                                muted: this.remoteAudio.muted,
-                                volume: this.remoteAudio.volume,
-                                currentTime: this.remoteAudio.currentTime,
-                                readyState: this.remoteAudio.readyState
-                            });
-                            
-                            // Проверяем треки в потоке
-                            const tracks = stream.getAudioTracks();
-                            tracks.forEach((t, i) => {
-                                console.log(`Трек ${i} после unmute:`, {
-                                    id: t.id,
-                                    enabled: t.enabled,
-                                    muted: t.muted,
-                                    readyState: t.readyState
-                                });
-                            });
-                            
-                            // ВАЖНО: Проверяем статистику соединения
-                            setTimeout(() => {
-                                this.checkConnectionStats();
-                            }, 2000);
-                            
-                            // Периодическая проверка статистики
-                            const statsInterval = setInterval(() => {
-                                if (this.peerConnection && this.remoteStream) {
-                                    this.checkConnectionStats();
-                                } else {
-                                    clearInterval(statsInterval);
-                                }
-                            }, 5000);
-                            
-                            // Останавливаем проверку через 60 секунд
-                            setTimeout(() => {
-                                clearInterval(statsInterval);
-                            }, 60000);
                             
                             // Запускаем мониторинг аудио потока
                             this.startRemoteAudioMonitoring(stream);
-                            
-                            // Дополнительная проверка: убеждаемся, что Audio элемент действительно воспроизводит
-                            setTimeout(() => {
-                                if (this.remoteAudio && !this.remoteAudio.paused) {
-                                    console.log('Проверка Audio элемента через 1 секунду:', {
-                                        paused: this.remoteAudio.paused,
-                                        muted: this.remoteAudio.muted,
-                                        volume: this.remoteAudio.volume,
-                                        currentTime: this.remoteAudio.currentTime,
-                                        readyState: this.remoteAudio.readyState
-                                    });
-                                    
-                                    // Проверяем, есть ли реальные данные
-                                    if (this.remoteAudio.currentTime === 0 && this.remoteAudio.readyState >= 2) {
-                                        console.warn('⚠️ Audio элемент не воспроизводит - возможно нет данных');
-                                    }
-                                }
-                            }, 1000);
                             
                             this.showAudioStatus(true);
                             this.updateStatus('Соединение установлено', 'connected');
@@ -460,13 +387,7 @@ class AudioCallClient {
                 
                 // Дополнительная проверка: следим за изменениями muted состояния
                 let muteCheckInterval = setInterval(() => {
-                    if (track.muted) {
-                        console.warn('⚠️ Трек все еще muted. Проверьте на стороне отправителя:');
-                        console.warn('- Микрофон включен?');
-                        console.warn('- Пользователь говорит?');
-                        console.warn('- Разрешения на микрофон даны?');
-                    } else {
-                        console.log('✅ Трек больше не muted');
+                    if (!track.muted) {
                         clearInterval(muteCheckInterval);
                     }
                 }, 2000);
@@ -478,7 +399,6 @@ class AudioCallClient {
                 
                 // Создаем или обновляем audio элемент
                 if (!this.remoteAudio) {
-                    console.log('Создание нового Audio элемента');
                     this.remoteAudio = new Audio();
                     this.remoteAudio.autoplay = true;
                     this.remoteAudio.volume = 1.0;
@@ -509,21 +429,12 @@ class AudioCallClient {
                 }
                 
                 // Устанавливаем поток в audio элемент
-                console.log('Установка потока в Audio элемент');
                 this.remoteAudio.srcObject = stream;
                 
                 // Проверяем состояние треков в потоке
                 const audioTracks = stream.getAudioTracks();
-                console.log('Всего аудио треков в потоке:', audioTracks.length);
-                audioTracks.forEach((t, index) => {
-                    console.log(`Трек ${index}:`, {
-                        id: t.id,
-                        enabled: t.enabled,
-                        readyState: t.readyState,
-                        muted: t.muted,
-                        label: t.label
-                    });
-                });
+                const activeTracksCount = audioTracks.filter(t => !t.muted && t.enabled).length;
+                console.log(`📊 Аудио треков в потоке: ${audioTracks.length}, активных: ${activeTracksCount}`);
                 
                 // Пытаемся воспроизвести
                 const playAudio = () => {
@@ -532,7 +443,6 @@ class AudioCallClient {
                         const activeTracks = stream.getAudioTracks().filter(t => 
                             t.readyState === 'live' && t.enabled && !t.muted
                         );
-                        console.log('Активных треков:', activeTracks.length);
                         
                         if (activeTracks.length === 0) {
                             console.warn('⚠️ Нет активных треков для воспроизведения (трек muted)');
@@ -551,24 +461,6 @@ class AudioCallClient {
                         
                         this.remoteAudio.play().then(() => {
                             console.log('✅ Удаленное аудио воспроизводится!');
-                            console.log('Audio element state:', {
-                                paused: this.remoteAudio.paused,
-                                muted: this.remoteAudio.muted,
-                                volume: this.remoteAudio.volume,
-                                currentTime: this.remoteAudio.currentTime,
-                                readyState: this.remoteAudio.readyState
-                            });
-                            
-                            // Проверяем треки в потоке
-                            const tracks = stream.getAudioTracks();
-                            tracks.forEach((t, i) => {
-                                console.log(`Трек ${i}:`, {
-                                    id: t.id,
-                                    enabled: t.enabled,
-                                    muted: t.muted,
-                                    readyState: t.readyState
-                                });
-                            });
                             
                             // ВАЖНО: Проверяем статистику соединения
                             setTimeout(() => {
@@ -663,18 +555,26 @@ class AudioCallClient {
                     candidate: event.candidate
                 });
             } else {
-                console.log('Все ICE кандидаты собраны');
+                console.log('✅ Все ICE кандидаты собраны');
             }
         };
 
         // Обработка изменения состояния соединения
         this.peerConnection.onconnectionstatechange = () => {
             const state = this.peerConnection.connectionState;
-            console.log('Connection state:', state);
+            console.log('📡 Connection state:', state);
             
             switch(state) {
                 case 'connected':
                     this.updateStatus('Соединение установлено', 'connected');
+                    
+                    // Настраиваем параметры кодека после установления соединения
+                    this.peerConnection.getSenders().forEach(sender => {
+                        if (sender.track && sender.track.kind === 'audio') {
+                            this.configureAudioCodec(sender);
+                        }
+                    });
+                    
                     // Убеждаемся, что аудио воспроизводится
                     if (this.remoteAudio && this.remoteAudio.paused) {
                         this.remoteAudio.play().catch(e => console.log('Ошибка воспроизведения:', e));
@@ -747,10 +647,18 @@ class AudioCallClient {
         // Обработка ICE соединения
         this.peerConnection.oniceconnectionstatechange = () => {
             const state = this.peerConnection.iceConnectionState;
-            console.log('ICE connection state:', state);
+            console.log('🌐 ICE connection state:', state);
             
             if (state === 'connected' || state === 'completed') {
                 console.log('✅ ICE соединение установлено:', state);
+                
+                // Настраиваем параметры кодека после установления соединения
+                this.peerConnection.getSenders().forEach(sender => {
+                    if (sender.track && sender.track.kind === 'audio') {
+                        this.configureAudioCodec(sender);
+                    }
+                });
+                
                 // Проверяем наличие треков
                 const receivers = this.peerConnection.getReceivers();
                 console.log('Получено треков:', receivers.length);
@@ -848,38 +756,192 @@ class AudioCallClient {
         };
     }
 
+    async configureAudioCodec(sender) {
+        if (!sender || !this.peerConnection) return;
+        
+        try {
+            const params = sender.getParameters();
+            if (!params || !params.codecs) {
+                // Параметры еще не готовы, пробуем позже
+                setTimeout(() => this.configureAudioCodec(sender), 100);
+                return;
+            }
+            
+            // Приоритет кодеков для лучшего качества:
+            // 1. Opus (лучший для голоса, низкая задержка, высокое качество)
+            // 2. G722 (хорошее качество)
+            // 3. PCMU/PCMA (fallback)
+            const preferredCodecs = ['opus', 'G722', 'PCMU', 'PCMA'];
+            
+            params.codecs = params.codecs.sort((a, b) => {
+                const aIndex = preferredCodecs.findIndex(codec => a.mimeType.toLowerCase().includes(codec.toLowerCase()));
+                const bIndex = preferredCodecs.findIndex(codec => b.mimeType.toLowerCase().includes(codec.toLowerCase()));
+                
+                if (aIndex === -1) return 1;
+                if (bIndex === -1) return -1;
+                return aIndex - bIndex;
+            });
+            
+            // Настройки для Opus (если доступен)
+            const opusCodec = params.codecs.find(c => c.mimeType.toLowerCase().includes('opus'));
+            if (opusCodec) {
+                opusCodec.clockRate = 48000; // Высокое качество (48kHz)
+                opusCodec.channels = 1; // Моно для голоса (меньше битрейт, лучше для голоса)
+                // FEC (Forward Error Correction) для устойчивости к потере пакетов
+                // maxaveragebitrate=64000 для высокого качества голоса
+                opusCodec.sdpFmtpLine = 'minptime=10;useinbandfec=1;maxaveragebitrate=64000;complexity=10;stereo=0';
+            }
+            
+            // Настройка адаптивного битрейта для высокого качества
+            if (params.encodings && params.encodings.length > 0) {
+                params.encodings.forEach(encoding => {
+                    // Максимальный битрейт для высокого качества (64 kbps для Opus голоса)
+                    encoding.maxBitrate = 64000;
+                    // Адаптивное время пакета для оптимизации
+                    encoding.adaptivePtime = true;
+                    // Приоритет качества над задержкой
+                    encoding.priority = 'high';
+                    // Минимальный битрейт для стабильности
+                    encoding.minBitrate = 16000;
+                });
+            }
+            
+            await sender.setParameters(params);
+            console.log('✅ Параметры кодека настроены:', params.codecs[0]?.mimeType);
+        } catch (error) {
+            console.warn('Не удалось настроить параметры кодека:', error);
+        }
+    }
+
     async createOffer() {
         try {
-            console.log('Создание offer...');
             const offer = await this.peerConnection.createOffer({
                 offerToReceiveAudio: true,
                 offerToReceiveVideo: false
             });
+            
+            // Модифицируем SDP для лучшего качества
+            offer.sdp = this.modifySDPForQuality(offer.sdp);
+            
             await this.peerConnection.setLocalDescription(offer);
-            console.log('Local description установлен:', offer.type);
+            console.log('✅ Offer создан и отправлен');
             
             this.socket.emit('offer', {
                 roomId: this.roomId,
                 offer: offer
             });
-            console.log('Offer отправлен');
         } catch (error) {
-            console.error('Ошибка создания offer:', error);
+            console.error('❌ Ошибка создания offer:', error);
         }
+    }
+    
+    modifySDPForQuality(sdp) {
+        let modifiedSDP = sdp;
+        let opusPayloadType = null;
+        
+        // Находим Opus кодек (может быть с каналами или без)
+        const opusRegex1 = /a=rtpmap:(\d+) opus\/(\d+)\/(\d+)/g; // С каналами
+        const opusRegex2 = /a=rtpmap:(\d+) opus\/(\d+)/g; // Без каналов
+        
+        // Сначала ищем с каналами
+        modifiedSDP = modifiedSDP.replace(opusRegex1, (match, payload, clockRate, channels) => {
+            opusPayloadType = payload;
+            // Устанавливаем 48kHz и моно для голоса (моно лучше для голоса, меньше битрейт)
+            return `a=rtpmap:${payload} opus/48000/1`;
+        });
+        
+        // Если не нашли, ищем без каналов
+        if (!opusPayloadType) {
+            modifiedSDP = modifiedSDP.replace(opusRegex2, (match, payload, clockRate) => {
+                opusPayloadType = payload;
+                return `a=rtpmap:${payload} opus/48000/1`;
+            });
+        }
+        
+        // Улучшаем параметры fmtp для Opus
+        if (opusPayloadType) {
+            const fmtpRegex = new RegExp(`a=fmtp:${opusPayloadType}\\s+([^\\r\\n]+)`, 'g');
+            modifiedSDP = modifiedSDP.replace(fmtpRegex, (match, params) => {
+                let newParams = params;
+                
+                // Включаем FEC (Forward Error Correction) для устойчивости к потере пакетов
+                if (!newParams.includes('useinbandfec=1')) {
+                    newParams += ';useinbandfec=1';
+                }
+                
+                // Минимальное время пакета для лучшего качества
+                if (!newParams.includes('minptime=')) {
+                    newParams += ';minptime=10';
+                }
+                
+                // Высокий битрейт для лучшего качества (48-64 kbps для голоса)
+                if (!newParams.includes('maxaveragebitrate=')) {
+                    newParams += ';maxaveragebitrate=64000';
+                }
+                
+                // Устанавливаем сложность кодирования (10 для лучшего качества)
+                if (!newParams.includes('complexity=')) {
+                    newParams += ';complexity=10';
+                }
+                
+                // Дополнительные параметры для качества
+                if (!newParams.includes('stereo=')) {
+                    newParams += ';stereo=0'; // Моно для голоса
+                }
+                
+                return `a=fmtp:${opusPayloadType} ${newParams}`;
+            });
+            
+            // Если fmtp строка еще не существует, добавляем её
+            if (!modifiedSDP.includes(`a=fmtp:${opusPayloadType}`)) {
+                const rtpmapIndex = modifiedSDP.indexOf(`a=rtpmap:${opusPayloadType}`);
+                if (rtpmapIndex !== -1) {
+                    const insertIndex = modifiedSDP.indexOf('\n', rtpmapIndex) + 1;
+                    modifiedSDP = modifiedSDP.slice(0, insertIndex) + 
+                        `a=fmtp:${opusPayloadType} useinbandfec=1;minptime=10;maxaveragebitrate=64000;complexity=10;stereo=0\n` +
+                        modifiedSDP.slice(insertIndex);
+                }
+            }
+        }
+        
+        // Переставляем Opus на первое место в списке кодеков
+        const audioLineRegex = /m=audio (\d+) RTP\/SAVPF ([\d\s]+)/;
+        const audioMatch = modifiedSDP.match(audioLineRegex);
+        if (audioMatch && opusPayloadType) {
+            const codecs = audioMatch[2].trim().split(/\s+/);
+            const opusIndex = codecs.indexOf(opusPayloadType);
+            if (opusIndex > 0) {
+                // Перемещаем Opus на первое место
+                codecs.splice(opusIndex, 1);
+                codecs.unshift(opusPayloadType);
+                modifiedSDP = modifiedSDP.replace(audioLineRegex, `m=audio ${audioMatch[1]} RTP/SAVPF ${codecs.join(' ')}`);
+            }
+        }
+        
+        return modifiedSDP;
     }
 
     async handleOffer(offer) {
         try {
-            console.log('Получен offer, создание answer...');
             await this.peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
-            console.log('Remote description установлен');
+            
+            // Настраиваем параметры кодека для всех senders
+            this.peerConnection.getSenders().forEach(sender => {
+                if (sender.track && sender.track.kind === 'audio') {
+                    this.configureAudioCodec(sender);
+                }
+            });
             
             const answer = await this.peerConnection.createAnswer({
                 offerToReceiveAudio: true,
                 offerToReceiveVideo: false
             });
+            
+            // Модифицируем SDP для лучшего качества
+            answer.sdp = this.modifySDPForQuality(answer.sdp);
+            
             await this.peerConnection.setLocalDescription(answer);
-            console.log('Answer создан и отправлен');
+            console.log('✅ Answer создан и отправлен');
             
             this.socket.emit('answer', {
                 roomId: this.roomId,
@@ -888,7 +950,7 @@ class AudioCallClient {
             // Обрабатываем накопленные ICE кандидаты
             this.processIceCandidatesQueue();
         } catch (error) {
-            console.error('Ошибка обработки offer:', error);
+            console.error('❌ Ошибка обработки offer:', error);
         }
     }
 
@@ -907,12 +969,10 @@ class AudioCallClient {
             // Если remote description еще не установлен, сохраняем кандидата в очередь
             if (!this.peerConnection.remoteDescription) {
                 this.iceCandidatesQueue.push(candidate);
-                console.log('ICE candidate добавлен в очередь');
                 return;
             }
             
             await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-            console.log('ICE candidate добавлен');
         } catch (error) {
             console.error('Ошибка обработки ICE candidate:', error);
         }
@@ -923,7 +983,6 @@ class AudioCallClient {
             const candidate = this.iceCandidatesQueue.shift();
             try {
                 await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-                console.log('ICE candidate из очереди добавлен');
             } catch (error) {
                 console.error('Ошибка обработки ICE candidate из очереди:', error);
             }
@@ -976,75 +1035,52 @@ class AudioCallClient {
             let packetsReceived = 0;
             let packetsSent = 0;
             let hasActiveConnection = false;
+            let jitter = 0;
+            let packetsLost = 0;
 
             stats.forEach(report => {
                 if (report.type === 'inbound-rtp' && report.mediaType === 'audio') {
                     bytesReceived = report.bytesReceived || 0;
                     packetsReceived = report.packetsReceived || 0;
+                    jitter = report.jitter || 0;
+                    packetsLost = report.packetsLost || 0;
                     hasActiveConnection = true;
-                    console.log('📊 Входящий RTP:', {
-                        bytesReceived,
-                        packetsReceived,
-                        jitter: report.jitter,
-                        packetsLost: report.packetsLost
-                    });
+                    
+                    // Логируем только если есть данные или проблемы
+                    if (bytesReceived > 0 || packetsLost > 0) {
+                        console.log('📊 Входящий RTP:', {
+                            bytes: bytesReceived,
+                            packets: packetsReceived,
+                            jitter: jitter.toFixed(3),
+                            lost: packetsLost
+                        });
+                    }
                 }
                 if (report.type === 'outbound-rtp' && report.mediaType === 'audio') {
                     bytesSent = report.bytesSent || 0;
                     packetsSent = report.packetsSent || 0;
-                    console.log('📊 Исходящий RTP:', {
-                        bytesSent,
-                        packetsSent,
-                        packetsLost: report.packetsLost
-                    });
-                }
-                if (report.type === 'candidate-pair' && report.state === 'succeeded') {
-                    console.log('📊 Candidate pair succeeded:', {
-                        localCandidate: report.localCandidateId,
-                        remoteCandidate: report.remoteCandidateId,
-                        bytesReceived: report.bytesReceived,
-                        bytesSent: report.bytesSent
-                    });
+                    
+                    // Логируем только если есть данные
+                    if (bytesSent > 0) {
+                        console.log('📊 Исходящий RTP:', {
+                            bytes: bytesSent,
+                            packets: packetsSent
+                        });
+                    }
                 }
             });
 
                 if (!hasActiveConnection) {
-                console.error('❌ Нет активного RTP соединения! Данные не передаются.');
-                console.error('Возможные причины:');
-                console.error('1. Соединение не установлено (failed/disconnected)');
-                console.error('2. Треки не передаются через соединение');
-                console.error('3. Проблемы с NAT/firewall - нужен TURN сервер');
-                console.error('4. Строгий NAT блокирует прямое соединение');
-                
-                // Проверяем, используется ли TURN
-                let usingRelay = false;
-                stats.forEach(report => {
-                    if (report.type === 'local-candidate' && report.candidateType === 'relay') {
-                        usingRelay = true;
-                        console.log('✅ TURN сервер используется:', report.candidate);
-                    }
-                });
-                
-                if (!usingRelay) {
-                    console.error('❌ TURN сервер НЕ используется! Это основная проблема.');
-                    console.error('Попробуйте:');
-                    console.error('1. Использовать VPN');
-                    console.error('2. Использовать другую сеть');
-                    console.error('3. Настроить свой TURN сервер');
-                }
-                
-                // Предлагаем решение
-                this.updateStatus('Ошибка: соединение не установлено. Попробуйте переподключиться или использовать другую сеть.', 'connecting');
+                console.error('❌ Нет активного RTP соединения!');
+                this.updateStatus('Ошибка: соединение не установлено. Попробуйте переподключиться.', 'connecting');
             } else if (bytesReceived === 0) {
-                console.warn('⚠️ RTP соединение есть, но данные не приходят (bytesReceived = 0)');
-                console.warn('Возможные причины:');
-                console.warn('1. Собеседник не говорит в микрофон');
-                console.warn('2. Микрофон выключен на стороне отправителя');
-                console.warn('3. Трек muted на стороне отправителя');
                 this.updateStatus('Соединение установлено. Ожидание звука от собеседника...', 'connected');
             } else {
-                console.log('✅ Данные передаются! Bytes received:', bytesReceived);
-                console.log('✅ Соединение работает корректно');
+                // Показываем качество соединения
+                const quality = packetsLost > 0 ? 'среднее' : 'отличное';
+                if (packetsLost > 0) {
+                    console.log(`📊 Качество: ${quality} (потеря пакетов: ${packetsLost})`);
+                }
             }
         } catch (error) {
             console.error('Ошибка получения статистики:', error);
@@ -1076,32 +1112,14 @@ class AudioCallClient {
 
                 if (level > 0.01) {
                     activeCount++;
-                    if (activeCount % 50 === 0) {
-                        console.log('🔊 Удаленное аудио активно, уровень:', level.toFixed(3));
-                    }
                     silentCount = 0;
                 } else {
                     silentCount++;
-                    if (silentCount === 100) {
-                        console.warn('⚠️ Удаленное аудио тихое или отсутствует уже 100 проверок');
-                        console.warn('Проверьте, что собеседник говорит в микрофон');
-                        // Проверяем статистику соединения
+                    if (silentCount === 200) {
+                        console.warn('⚠️ Удаленное аудио тихое. Проверьте, что собеседник говорит.');
                         this.checkConnectionStats();
                     }
-                    if (silentCount === 200) {
-                        console.error('❌ КРИТИЧНО: Данные не приходят уже 200 проверок!');
-                        console.error('Соединение не работает. Попробуйте переподключиться.');
-                        this.updateStatus('Ошибка: данные не приходят. Переподключитесь.', 'connecting');
-                    }
                 }
-
-                // Проверяем состояние треков
-                const tracks = stream.getAudioTracks();
-                tracks.forEach((t, i) => {
-                    if (t.muted && activeCount > 0) {
-                        console.warn(`⚠️ Трек ${i} стал muted во время воспроизведения!`);
-                    }
-                });
 
                 if (this.remoteStream && stream) {
                     requestAnimationFrame(checkRemoteAudioLevel);
@@ -1109,7 +1127,6 @@ class AudioCallClient {
             };
 
             checkRemoteAudioLevel();
-            console.log('Мониторинг удаленного аудио запущен');
         } catch (error) {
             console.error('Ошибка запуска мониторинга удаленного аудио:', error);
         }
